@@ -134,7 +134,12 @@ import_certs_to_wsl() {
 
     sudo mkdir -p "$WSL_CERT_IMPORT_DIR"
 
-    # Ensure exported certificates are in PEM format before copying
+    # Ensure exported certificates are in PEM format before copying.
+    # NOTE: detect format by CONTENT, not by `openssl x509 -in "$cert"`. OpenSSL
+    # 3.x auto-detects DER in the x509 command, so that test succeeds on DER
+    # files and the conversion is wrongly skipped. The DER .crt files then get
+    # installed but update-ca-certificates omits them from the PEM bundle, so
+    # curl never trusts them.
     for cert in "$WSL_CERT_EXPORT_DIR"/*.{crt,cer}; do
         # Skip if the glob didn't match any files
         [ -e "$cert" ] || continue
@@ -142,15 +147,21 @@ import_certs_to_wsl() {
         # Ensure it's a file and not a directory
         [ -f "$cert" ] || continue
 
-        if openssl x509 -in "$cert" -noout -text > /dev/null 2>&1; then
+        if head -c 64 "$cert" | grep -q "BEGIN CERTIFICATE"; then
             log SUCCESS "Certificate is already in PEM format: $(basename "$cert")"
         else
             log INFO "Converting $(basename "$cert") from DER to PEM..."
-            openssl x509 -inform DER -in "$cert" -out "$cert.pem"
-            mv "$cert.pem" "$cert"  # Replace original with PEM version
+            if openssl x509 -inform DER -in "$cert" -out "$cert.pem" 2>/dev/null; then
+                mv "$cert.pem" "$cert"  # Replace original with PEM version
+            else
+                log ERROR "Failed to convert $(basename "$cert") to PEM; skipping."
+                rm -f "$cert.pem"
+            fi
         fi
     done
 
+    # Strip CRLF only now that every file is PEM text. Running sed on binary DER
+    # would corrupt it, so this must come after the conversion loop above.
     dos2unix "$WSL_CERT_EXPORT_DIR"/*.crt 2>/dev/null || sed -i 's/\r$//' "$WSL_CERT_EXPORT_DIR"/*.crt
 
     sudo cp "$WSL_CERT_EXPORT_DIR"/*.crt "$WSL_CERT_IMPORT_DIR" 2>/dev/null
